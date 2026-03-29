@@ -1,0 +1,21 @@
+# Configuration file for https://skip.tools project
+skip:
+  mode: 'transpiled'
+  bridging: true
+
+settings:
+  contents:
+    - block: 'dependencyResolutionManagement'
+      contents:
+        - block: 'repositories'
+          contents:
+            # unfortunately needed for dependency com.github.davidliu:audioswitch
+            - 'maven("https://jitpack.io")'
+
+build:
+  contents:
+    - block: 'dependencies'
+      contents:
+        - 'implementation("io.livekit:livekit-android:2.24.0")'
+        # CameraX support with pinch to zoom, torch control, etc.
+        - 'implementation("io.livekit:livekit-android-camerax:2.24.0")'
