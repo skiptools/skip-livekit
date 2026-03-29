@@ -251,9 +251,7 @@ public class LiveKitRoomManager: ObservableObject {
         let reliabilityValue = reliability == .reliable ? DataPublishReliability.RELIABLE : DataPublishReliability.LOSSY
         rm.localParticipant.publishData(platformData, reliabilityValue, topic, nil)
         #else
-        var options = DataPublishOptions()
-        options.reliable = reliability == .reliable
-        options.topic = topic
+        let options = DataPublishOptions(topic: topic, reliable: reliability == .reliable)
         try await rm.localParticipant.publish(data: data, options: options)
         #endif
     }
