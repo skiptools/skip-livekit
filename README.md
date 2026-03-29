@@ -55,7 +55,7 @@ struct CallView: View {
 }
 ```
 
-This renders a participant grid with camera, microphone, and hang-up buttons. It connects automatically when the view appears and handles disconnection when the user taps the hang-up button.
+This renders a participant grid with controls for camera, microphone, screen sharing, camera flip, speakerphone, and hang-up. It connects automatically when the view appears. Participant tiles show connection quality indicators, speaking highlights, and screen share status.
 
 ## Using LiveKitRoomManager
 
@@ -104,18 +104,39 @@ struct MyRoomView: View {
 
 ### LiveKitRoomManager API
 
-| Property / Method | Type | Description |
+**Published Properties:**
+
+| Property | Type | Description |
 |---|---|---|
 | `connectionState` | `LiveKitConnectionState` | Current state: `.disconnected`, `.connecting`, `.connected`, `.reconnecting` |
 | `participants` | `[LiveKitParticipantInfo]` | All participants including the local user |
 | `roomName` | `String?` | The name of the connected room |
+| `roomMetadata` | `String?` | Server-assigned metadata for the room |
 | `isCameraEnabled` | `Bool` | Whether the local camera is active |
 | `isMicrophoneEnabled` | `Bool` | Whether the local microphone is active |
+| `isScreenShareEnabled` | `Bool` | Whether the local screen share is active |
+| `isSpeakerphoneEnabled` | `Bool` | Whether audio is routed to the speakerphone (default `true`) |
+| `isFrontCamera` | `Bool` | Whether the front-facing camera is selected (default `true`) |
 | `errorMessage` | `String?` | Error description if connection failed |
+
+**Callbacks:**
+
+| Property | Type | Description |
+|---|---|---|
+| `onDataReceived` | `((String?, Data, String?) -> Void)?` | Called when a data message arrives. Parameters: sender identity, data, topic. |
+
+**Methods:**
+
+| Method | Type | Description |
+|---|---|---|
 | `connect(url:token:)` | `async throws` | Connect to a LiveKit server |
 | `disconnect()` | `async` | Disconnect from the current room |
 | `setCameraEnabled(_:)` | `async throws` | Toggle the local camera |
 | `setMicrophoneEnabled(_:)` | `async throws` | Toggle the local microphone |
+| `setScreenShareEnabled(_:)` | `async throws` | Toggle local screen sharing |
+| `setSpeakerphoneEnabled(_:)` | | Toggle between speakerphone and earpiece audio output |
+| `switchCamera()` | `async throws` | Switch between front and back camera |
+| `publishData(_:reliability:topic:)` | `async throws` | Send data to other participants (reliable or lossy) |
 | `updateParticipants()` | | Refresh the participant list from room state |
 
 ### LiveKitParticipantInfo
@@ -127,10 +148,37 @@ public struct LiveKitParticipantInfo: Identifiable {
     public let id: String
     public let identity: String
     public let name: String
+    public let metadata: String?
     public let isSpeaking: Bool
+    public let audioLevel: Float
+    public let connectionQuality: LiveKitConnectionQuality
     public let isCameraEnabled: Bool
     public let isMicrophoneEnabled: Bool
+    public let isScreenShareEnabled: Bool
     public let isLocal: Bool
+}
+```
+
+### LiveKitConnectionQuality
+
+Connection quality reported per-participant: `.unknown`, `.lost`, `.poor`, `.good`, `.excellent`.
+
+### LiveKitDataReliability
+
+Controls data message delivery: `.reliable` (ordered, guaranteed — like TCP) or `.lossy` (fast, unordered — like UDP).
+
+### Sending and Receiving Data
+
+```swift
+// Send a message to all participants
+let message = "Hello!".data(using: .utf8)!
+try await room.publishData(message, reliability: .reliable, topic: "chat")
+
+// Receive messages
+room.onDataReceived = { senderIdentity, data, topic in
+    if let text = String(data: data, encoding: .utf8) {
+        print("\(senderIdentity ?? "unknown"): \(text)")
+    }
 }
 ```
 
