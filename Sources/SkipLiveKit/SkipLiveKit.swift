@@ -218,7 +218,7 @@ public class LiveKitRoomManager: ObservableObject {
     }
 
     /// Toggle between speakerphone and earpiece audio output.
-    public func updateSpeakerphoneEnabled(_ enabled: Bool) {
+    public func setSpeakerphoneEnabled(_ enabled: Bool) async {
         #if SKIP
         guard let rm = nativeRoom else { return }
         if let audioHandler = rm.audioHandler as? AudioSwitchHandler {
@@ -231,7 +231,7 @@ public class LiveKitRoomManager: ObservableObject {
                 }
             }
         }
-        #else
+        #elseif os(iOS)
         AudioManager.shared.isSpeakerOutputPreferred = enabled
         #endif
 
@@ -579,7 +579,7 @@ public struct LiveKitRoomView: View {
                     activeColor: .white,
                     inactiveColor: .white
                 ) {
-                    manager.updateSpeakerphoneEnabled(!manager.isSpeakerphoneEnabled)
+                    Task { try? await manager.setSpeakerphoneEnabled(!manager.isSpeakerphoneEnabled) }
                 }
 
                 Button(action: {

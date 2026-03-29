@@ -134,8 +134,8 @@ struct MyRoomView: View {
 | `setCameraEnabled(_:)` | `async throws` | Toggle the local camera |
 | `setMicrophoneEnabled(_:)` | `async throws` | Toggle the local microphone |
 | `setScreenShareEnabled(_:)` | `async throws` | Toggle local screen sharing |
+| `setSpeakerphoneEnabled(_:)` | | Toggle between speakerphone and earpiece audio output |
 | `switchCamera()` | `async throws` | Switch between front and back camera |
-| `updateSpeakerphoneEnabled(_:)` | | Toggle between speakerphone and earpiece audio output |
 | `publishData(_:reliability:topic:)` | `async throws` | Send data to other participants (reliable or lossy) |
 | `updateParticipants()` | | Refresh the participant list from room state |
 
