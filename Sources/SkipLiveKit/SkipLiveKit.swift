@@ -5,9 +5,11 @@ import SwiftUI
 import OSLog
 #if SKIP
 import io.livekit.android.__
+import io.livekit.android.audio.__
 import io.livekit.android.room.__
 import io.livekit.android.room.participant.__
 import io.livekit.android.room.track.__
+import com.twilio.audioswitch.AudioDevice
 #else
 import LiveKit
 #endif
@@ -24,6 +26,25 @@ public enum LiveKitConnectionState: String {
     case reconnecting
 }
 
+// MARK: - Connection Quality
+
+/// Platform-independent connection quality for a participant.
+public enum LiveKitConnectionQuality: String {
+    case unknown
+    case lost
+    case poor
+    case good
+    case excellent
+}
+
+// MARK: - Data Reliability
+
+/// Whether data messages are sent reliably (TCP-like) or lossy (UDP-like).
+public enum LiveKitDataReliability {
+    case reliable
+    case lossy
+}
+
 // MARK: - Participant Info
 
 /// Platform-independent representation of a room participant.
@@ -31,9 +52,13 @@ public struct LiveKitParticipantInfo: Identifiable {
     public let id: String
     public let identity: String
     public let name: String
+    public let metadata: String?
     public let isSpeaking: Bool
+    public let audioLevel: Float
+    public let connectionQuality: LiveKitConnectionQuality
     public let isCameraEnabled: Bool
     public let isMicrophoneEnabled: Bool
+    public let isScreenShareEnabled: Bool
     public let isLocal: Bool
 }
 
@@ -62,7 +87,15 @@ public class LiveKitRoomManager: ObservableObject {
     @Published public var errorMessage: String?
     @Published public var isCameraEnabled: Bool = false
     @Published public var isMicrophoneEnabled: Bool = false
+    @Published public var isScreenShareEnabled: Bool = false
+    @Published public var isSpeakerphoneEnabled: Bool = true
+    @Published public var isFrontCamera: Bool = true
     @Published public var roomName: String?
+    @Published public var roomMetadata: String?
+
+    /// Called when a data message is received from another participant.
+    /// Parameters are: (senderIdentity, data, topic).
+    public var onDataReceived: ((String?, Data, String?) -> Void)?
 
     #if SKIP
     var nativeRoom: io.livekit.android.room.Room? = nil
@@ -91,6 +124,7 @@ public class LiveKitRoomManager: ObservableObject {
             #endif
 
             connectionState = .connected
+            roomMetadata = rm.metadata
             updateParticipants()
             logger.info("Connected to room: \(self.roomName ?? "unknown")")
         } catch {
@@ -114,7 +148,10 @@ public class LiveKitRoomManager: ObservableObject {
         participants = []
         isCameraEnabled = false
         isMicrophoneEnabled = false
+        isScreenShareEnabled = false
+        isFrontCamera = true
         roomName = nil
+        roomMetadata = nil
         logger.info("Disconnected from room")
     }
 
@@ -146,6 +183,81 @@ public class LiveKitRoomManager: ObservableObject {
         updateParticipants()
     }
 
+    /// Enable or disable screen sharing.
+    public func setScreenShareEnabled(_ enabled: Bool) async throws {
+        #if SKIP
+        guard let rm = nativeRoom else { return }
+        rm.localParticipant.setScreenShareEnabled(enabled)
+        #else
+        guard let rm = nativeRoom else { return }
+        try await rm.localParticipant.setScreenShare(enabled: enabled)
+        #endif
+
+        isScreenShareEnabled = enabled
+        updateParticipants()
+    }
+
+    /// Switch between front and back camera.
+    public func switchCamera() async throws {
+        #if SKIP
+        guard let rm = nativeRoom else { return }
+        let publication = rm.localParticipant.getTrackPublication(Track.Source.CAMERA)
+        if let videoTrack = publication?.track as? LocalVideoTrack {
+            videoTrack.switchCamera()
+        }
+        #else
+        guard let rm = nativeRoom else { return }
+        if let publication = rm.localParticipant.localVideoTracks.first,
+           let track = publication.track as? LocalVideoTrack,
+           let capturer = track.capturer as? CameraCapturer {
+            try await capturer.switchCameraPosition()
+        }
+        #endif
+
+        isFrontCamera = !isFrontCamera
+    }
+
+    /// Toggle between speakerphone and earpiece audio output.
+    public func setSpeakerphoneEnabled(_ enabled: Bool) {
+        #if SKIP
+        guard let rm = nativeRoom else { return }
+        if let audioHandler = rm.audioHandler as? AudioSwitchHandler {
+            let devices = audioHandler.availableAudioDevices
+            for device in devices {
+                if enabled && device is AudioDevice.Speakerphone {
+                    audioHandler.selectDevice(device)
+                } else if !enabled && device is AudioDevice.Earpiece {
+                    audioHandler.selectDevice(device)
+                }
+            }
+        }
+        #else
+        AudioManager.shared.isSpeakerOutputPreferred = enabled
+        #endif
+
+        isSpeakerphoneEnabled = enabled
+    }
+
+    /// Send data to other participants in the room.
+    /// - Parameters:
+    ///   - data: The data to send.
+    ///   - reliability: Whether to use reliable (TCP-like) or lossy (UDP-like) delivery.
+    ///   - topic: Optional topic string for filtering on the receiving side.
+    public func publishData(_ data: Data, reliability: LiveKitDataReliability = .reliable, topic: String? = nil) async throws {
+        guard let rm = nativeRoom else { return }
+
+        #if SKIP
+        let platformData = data.platformValue
+        let reliabilityValue = reliability == .reliable ? DataPublishReliability.RELIABLE : DataPublishReliability.LOSSY
+        rm.localParticipant.publishData(platformData, reliabilityValue, topic, nil)
+        #else
+        var options = DataPublishOptions()
+        options.reliable = reliability == .reliable
+        options.topic = topic
+        try await rm.localParticipant.publish(data: data, options: options)
+        #endif
+    }
+
     /// Refresh the participants list from the current room state.
     public func updateParticipants() {
         guard let rm = nativeRoom else {
@@ -163,22 +275,33 @@ public class LiveKitRoomManager: ObservableObject {
             id: localSid == "null" ? "local" : localSid,
             identity: localIdentity == "null" ? "local" : localIdentity,
             name: local.name ?? "You",
-            isSpeaking: false,
+            metadata: local.metadata,
+            isSpeaking: local.isSpeaking,
+            audioLevel: local.audioLevel,
+            connectionQuality: connectionQualityFromAndroid(local.connectionQuality),
             isCameraEnabled: self.isCameraEnabled,
             isMicrophoneEnabled: self.isMicrophoneEnabled,
+            isScreenShareEnabled: self.isScreenShareEnabled,
             isLocal: true
         ))
         for entry in rm.remoteParticipants {
             let p = entry.value
             let pSid = "\(p.sid)"
             let pIdentity = "\(p.identity)"
+            let hasCamera = p.getTrackPublication(Track.Source.CAMERA)?.track != nil
+            let hasMic = p.getTrackPublication(Track.Source.MICROPHONE)?.track != nil
+            let hasScreen = p.getTrackPublication(Track.Source.SCREEN_SHARE)?.track != nil
             infos.append(LiveKitParticipantInfo(
                 id: pSid == "null" ? "" : pSid,
                 identity: pIdentity == "null" ? "" : pIdentity,
                 name: p.name ?? (pIdentity == "null" ? "Unknown" : pIdentity),
-                isSpeaking: false,
-                isCameraEnabled: false,
-                isMicrophoneEnabled: false,
+                metadata: p.metadata,
+                isSpeaking: p.isSpeaking,
+                audioLevel: p.audioLevel,
+                connectionQuality: connectionQualityFromAndroid(p.connectionQuality),
+                isCameraEnabled: hasCamera,
+                isMicrophoneEnabled: hasMic,
+                isScreenShareEnabled: hasScreen,
                 isLocal: false
             ))
         }
@@ -188,9 +311,13 @@ public class LiveKitRoomManager: ObservableObject {
             id: local.sid?.stringValue ?? "local",
             identity: local.identity?.stringValue ?? "local",
             name: local.name ?? "You",
+            metadata: local.metadata,
             isSpeaking: local.isSpeaking,
+            audioLevel: local.audioLevel,
+            connectionQuality: connectionQualityFromSwift(local.connectionQuality),
             isCameraEnabled: local.isCameraEnabled(),
             isMicrophoneEnabled: local.isMicrophoneEnabled(),
+            isScreenShareEnabled: local.isScreenShareEnabled(),
             isLocal: true
         ))
         for (_, participant) in rm.remoteParticipants {
@@ -198,9 +325,13 @@ public class LiveKitRoomManager: ObservableObject {
                 id: participant.sid?.stringValue ?? "",
                 identity: participant.identity?.stringValue ?? "",
                 name: participant.name ?? participant.identity?.stringValue ?? "Unknown",
+                metadata: participant.metadata,
                 isSpeaking: participant.isSpeaking,
+                audioLevel: participant.audioLevel,
+                connectionQuality: connectionQualityFromSwift(participant.connectionQuality),
                 isCameraEnabled: participant.isCameraEnabled(),
                 isMicrophoneEnabled: participant.isMicrophoneEnabled(),
+                isScreenShareEnabled: participant.isScreenShareEnabled(),
                 isLocal: false
             ))
         }
@@ -208,6 +339,32 @@ public class LiveKitRoomManager: ObservableObject {
 
         participants = infos
     }
+
+    #if SKIP
+    private func connectionQualityFromAndroid(_ quality: io.livekit.android.room.participant.ConnectionQuality) -> LiveKitConnectionQuality {
+        if quality == io.livekit.android.room.participant.ConnectionQuality.EXCELLENT {
+            return .excellent
+        } else if quality == io.livekit.android.room.participant.ConnectionQuality.GOOD {
+            return .good
+        } else if quality == io.livekit.android.room.participant.ConnectionQuality.POOR {
+            return .poor
+        } else if quality == io.livekit.android.room.participant.ConnectionQuality.LOST {
+            return .lost
+        } else {
+            return .unknown
+        }
+    }
+    #else
+    private func connectionQualityFromSwift(_ quality: ConnectionQuality) -> LiveKitConnectionQuality {
+        switch quality {
+        case .excellent: return .excellent
+        case .good: return .good
+        case .poor: return .poor
+        case .lost: return .lost
+        default: return .unknown
+        }
+    }
+    #endif
 }
 
 // MARK: - Room View
@@ -294,7 +451,7 @@ public struct LiveKitRoomView: View {
     }
 
     func participantTile(_ participant: LiveKitParticipantInfo) -> some View {
-        ZStack(alignment: .bottomLeading) {
+        ZStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color(white: 0.15))
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
@@ -310,68 +467,149 @@ public struct LiveKitRoomView: View {
                         }
                     }
                 }
+                .overlay(alignment: .topTrailing) {
+                    HStack(spacing: 4) {
+                        if participant.isScreenShareEnabled {
+                            Image(systemName: "rectangle.on.rectangle")
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                        }
+                        connectionQualityIcon(participant.connectionQuality)
+                    }
+                    .padding(8)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    HStack(spacing: 4) {
+                        if participant.isSpeaking {
+                            Image(systemName: "waveform")
+                                .font(.caption2)
+                                .foregroundStyle(.green)
+                        }
+                        Text(participant.isLocal ? "You" : participant.name)
+                            .font(.caption2)
+                            .foregroundStyle(.white)
+                        if !participant.isMicrophoneEnabled {
+                            Image(systemName: "mic.slash.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.black.opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
+                }
 
-            HStack(spacing: 4) {
-                if participant.isSpeaking {
-                    Image(systemName: "waveform")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                }
-                Text(participant.isLocal ? "You" : participant.name)
-                    .font(.caption2)
-                    .foregroundStyle(.white)
-                if !participant.isMicrophoneEnabled {
-                    Image(systemName: "mic.slash.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.red)
-                }
+            if participant.isSpeaking {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.green, lineWidth: 2)
+                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .padding(8)
         }
     }
 
+    func connectionQualityIcon(_ quality: LiveKitConnectionQuality) -> some View {
+        let icon: String
+        let color: Color
+        switch quality {
+        case .excellent:
+            icon = "wifi"
+            color = .green
+        case .good:
+            icon = "wifi"
+            color = .white
+        case .poor:
+            icon = "wifi.exclamationmark"
+            color = .yellow
+        case .lost:
+            icon = "wifi.slash"
+            color = .red
+        case .unknown:
+            icon = "wifi"
+            color = Color.white.opacity(0.3)
+        }
+        return Image(systemName: icon)
+            .font(.caption2)
+            .foregroundStyle(color)
+    }
+
     var controlsBar: some View {
-        HStack(spacing: 24) {
-            Button(action: {
-                Task { try? await manager.setMicrophoneEnabled(!manager.isMicrophoneEnabled) }
-            }) {
-                Image(systemName: manager.isMicrophoneEnabled ? "mic.fill" : "mic.slash.fill")
-                    .font(.title2)
-                    .foregroundStyle(manager.isMicrophoneEnabled ? .white : .red)
-                    .frame(width: 50, height: 50)
-                    .background(Color(white: 0.2))
-                    .clipShape(Circle())
-            }
+        VStack(spacing: 12) {
+            HStack(spacing: 20) {
+                controlButton(
+                    icon: manager.isMicrophoneEnabled ? "mic.fill" : "mic.slash.fill",
+                    isActive: manager.isMicrophoneEnabled,
+                    activeColor: .white,
+                    inactiveColor: .red
+                ) {
+                    Task { try? await manager.setMicrophoneEnabled(!manager.isMicrophoneEnabled) }
+                }
 
-            Button(action: {
-                Task { try? await manager.setCameraEnabled(!manager.isCameraEnabled) }
-            }) {
-                Image(systemName: manager.isCameraEnabled ? "video.fill" : "video.slash.fill")
-                    .font(.title2)
-                    .foregroundStyle(manager.isCameraEnabled ? .white : .red)
-                    .frame(width: 50, height: 50)
-                    .background(Color(white: 0.2))
-                    .clipShape(Circle())
-            }
+                controlButton(
+                    icon: manager.isCameraEnabled ? "video.fill" : "video.slash.fill",
+                    isActive: manager.isCameraEnabled,
+                    activeColor: .white,
+                    inactiveColor: .red
+                ) {
+                    Task { try? await manager.setCameraEnabled(!manager.isCameraEnabled) }
+                }
 
-            Button(action: {
-                Task { await manager.disconnect() }
-            }) {
-                Image(systemName: "phone.down.fill")
-                    .font(.title2)
-                    .foregroundStyle(.white)
-                    .frame(width: 50, height: 50)
-                    .background(Color.red)
-                    .clipShape(Circle())
+                if manager.isCameraEnabled {
+                    controlButton(
+                        icon: "camera.rotate.fill",
+                        isActive: true,
+                        activeColor: .white,
+                        inactiveColor: .white
+                    ) {
+                        Task { try? await manager.switchCamera() }
+                    }
+                }
+
+                controlButton(
+                    icon: manager.isScreenShareEnabled ? "rectangle.inset.filled.and.person.filled" : "rectangle.on.rectangle",
+                    isActive: manager.isScreenShareEnabled,
+                    activeColor: .green,
+                    inactiveColor: .white
+                ) {
+                    Task { try? await manager.setScreenShareEnabled(!manager.isScreenShareEnabled) }
+                }
+
+                controlButton(
+                    icon: manager.isSpeakerphoneEnabled ? "speaker.wave.2.fill" : "speaker.fill",
+                    isActive: manager.isSpeakerphoneEnabled,
+                    activeColor: .white,
+                    inactiveColor: .white
+                ) {
+                    manager.setSpeakerphoneEnabled(!manager.isSpeakerphoneEnabled)
+                }
+
+                Button(action: {
+                    Task { await manager.disconnect() }
+                }) {
+                    Image(systemName: "phone.down.fill")
+                        .font(.title3)
+                        .foregroundStyle(.white)
+                        .frame(width: 50, height: 50)
+                        .background(Color.red)
+                        .clipShape(Circle())
+                }
             }
         }
-        .padding(.vertical, 16)
+        .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
         .background(Color(white: 0.1))
+    }
+
+    func controlButton(icon: String, isActive: Bool, activeColor: Color, inactiveColor: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(isActive ? activeColor : inactiveColor)
+                .frame(width: 50, height: 50)
+                .background(Color(white: 0.2))
+                .clipShape(Circle())
+        }
     }
 }
 
