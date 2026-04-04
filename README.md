@@ -212,13 +212,8 @@ Platform differences in property types (such as Kotlin inline classes for partic
 
 ## Building
 
-This project is a free Swift Package Manager module that uses the
-[Skip](https://skip.dev) plugin to transpile Swift into Kotlin.
-
-Building the module requires that Skip be installed using
-[Homebrew](https://brew.sh) with `brew install skiptools/skip/skip`.
-This will also install the necessary build prerequisites:
-Kotlin, Gradle, and the Android build tools.
+This project is a Swift Package Manager module that uses the
+[Skip](https://skip.dev) plugin to build the package for both iOS and Android.
 
 ## Testing
 
